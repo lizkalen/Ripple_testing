@@ -1,0 +1,10 @@
+
+ipykernel
+numpy<2
+pandas<2.2
+matplotlib
+PyQt6
+ipykernel
+scipy
+scikit-learn
+scikit-learn-extra

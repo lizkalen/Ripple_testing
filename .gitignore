@@ -1,0 +1,5 @@
+# Ignore data and result output folders
+.ripple_venv_py311/
+archive/
+data/
+results/
