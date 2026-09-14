@@ -20,7 +20,7 @@ from collections import defaultdict
 import glob 
 
 ###
-def get_task_data(s_dir, n_reps, movement_names, file_type, sampling_freq, win=None):
+def get_task_data(s_dir, n_reps, move_names, sampling_freq, win=None):
     """
     Load EMG data from multiple pickle files, 
     then combine repitions per movement type, with the option of specifying a window within each repition to keep.
@@ -32,44 +32,99 @@ def get_task_data(s_dir, n_reps, movement_names, file_type, sampling_freq, win=N
     - file_type: str, the type of files to load (e.g., 'move' for movement files, or 'rest' for rest files).
     - sampling_freq: float, sampling frequency of data collection in Hz.
     - win: float, optional, window size in seconds to extract from the middle of the movement
-      duration. If None, the entire rep duration is used.
+    - duration. If None, the entire rep duration is used.
 
     Returns:
-    - iso_dict: dict containing each movement as keys, containing:
-        - emg_reps: list of dataframes, each containing the EMG data for a single repetition
-        - combined_emg_reps: ndarray, concatenated (wide) EMG data for all repetitions
-        - durations: list of floats, duration of each repetition
+    - iso_dict: dict containing each movement and rest as keys. Each contains:
+        - 'movement': dict with movement data, containing keys for:
+            - 'reps': dict with data from each movement rep number, each rep number containing keys for:
+                - 'emg': dataframe with emg data for rep
+                - 'duration: dataframe with duration for rep
+            - 'combined': ndarray containing combined data for entire movement, all reps combined
+        - 'rest': dict wth data from each rest rep number, same structure as 'movement'
+        - 'm_r_combined': ndarray containing combined data from movement and rest, one rep after another
     """
-    task_files = sorted(glob.glob(os.path.join(s_dir, f'*{file_type}*')))
+    move_files = sorted(glob.glob(os.path.join(s_dir, '*move*')))
+    rest_files = sorted(glob.glob(os.path.join(s_dir, '*rest*')))
+    prep_files = sorted(glob.glob(os.path.join(s_dir, '*prep*')))
 
     half_win = win / 2 if win is not None else None
+    n_movements = len(move_names)
+
+    def load_reps(file_list):
+            """
+            Read pkl files from a single movement type and return the emg + combined data for that movement
+            Also have the option to select a specific window from the rep to be included only
+            """
+            reps = {}
+            emg_list = []
+
+            for rep_num, file_name in enumerate(file_list):
+                rep_data = pd.read_pickle(file_name)
+                dur = rep_data['duration_s']
+                rep_df = pd.DataFrame(rep_data['data'])
+
+                if win is None:
+                    emg = rep_df
+                else:
+                    iso_start = int(((dur / 2) - half_win) * sampling_freq)
+                    iso_end = int(((dur / 2) + half_win) * sampling_freq)
+                    emg = rep_df.iloc[:, iso_start:iso_end]
+
+                reps[rep_num] = {'emg': emg, 'duration': dur}
+                emg_list.append(emg)
+
+            combined = (
+                pd.concat(emg_list, ignore_index=True, axis=1).to_numpy()
+                if emg_list else None
+            )
+            return reps, combined
+
     iso_dict = {}
+    n_rest_reps = n_reps - 1  # every movement has 1 fewer rest rep than move/prep reps
 
-    for movement_num, movement_type in enumerate(movement_names):
-        start = movement_num * n_reps
-        end = start + n_reps
-        movement_files = task_files[start:end]
+    for move_num, move_type in enumerate(move_names):
+        move_start = move_num * n_reps
+        move_end = move_start + n_reps
+        move_reps, move_combined = load_reps(move_files[move_start:move_end])
 
-        movement_data = [pd.read_pickle(file_name) for file_name in movement_files]
-        durations = [rep_data['duration_s'] for rep_data in movement_data]
+        prep_start = move_num * n_reps
+        prep_end = prep_start + n_reps
+        prep_reps, prep_combined = load_reps(prep_files[prep_start:prep_end])
 
-        rep_emg = []
-        for rep_data, dur in zip(movement_data, durations):
-            rep_df = pd.DataFrame(rep_data['data'])
+        rest_start = move_num * n_rest_reps
+        rest_end = move_start + n_rest_reps
+        rest_reps, rest_combined = load_reps(rest_files[rest_start:rest_end])
 
-            if win is None:
-                rep_data = rep_df  # no windowing, take entire rep duration
-            else:
-                iso_start = int(((dur / 2) - half_win) * sampling_freq)
-                iso_end = int(((dur / 2) + half_win) * sampling_freq)
-                rep_data = rep_df.iloc[:, iso_start:iso_end]
+        # interleave rep-by-rep: prep rep1, move rep1, rest rep1, prep rep2, ...
+        interleaved_emg = []
+        interleaved_dur = []
+        interleaved_poses = []
+        for rep_num in range(n_reps):
+            interleaved_emg.append(prep_reps[rep_num]['emg'].reset_index(drop=True))
+            interleaved_dur.append(prep_reps[rep_num]['duration'])
+            interleaved_poses.append('prep')
 
-            rep_emg.append(rep_data)
+            interleaved_emg.append(move_reps[rep_num]['emg'].reset_index(drop=True))
+            interleaved_dur.append(move_reps[rep_num]['duration'])
+            interleaved_poses.append(move_type)
 
-        iso_dict[movement_type] = {
-            'emg_reps': rep_emg,
-            'combined_emg_reps': pd.concat(rep_emg, ignore_index=True, axis=1).to_numpy(),
-            'durations': durations
+            if rep_num in rest_reps:
+                interleaved_emg.append(rest_reps[rep_num]['emg'].reset_index(drop=True))
+                interleaved_dur.append(rest_reps[rep_num]['duration'])
+                interleaved_poses.append('rest')
+
+        combined_emg = pd.concat(interleaved_emg, axis=1, ignore_index=True)
+
+        iso_dict[move_type] = {
+            'movement': {'reps': move_reps, 'emg_combined': move_combined},
+            'rest': {'reps': rest_reps, 'emg_combined': rest_combined},
+            'prep': {'reps': prep_reps, 'emg_combined': prep_combined},
+            'm_r_combined': {
+                'emg': combined_emg,
+                'duration': interleaved_dur,
+                'poses': interleaved_poses,
+            },
         }
 
     return iso_dict

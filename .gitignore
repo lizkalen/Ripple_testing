@@ -3,3 +3,6 @@
 archive/
 data/
 results/
+src/mvdecoder
+__pycache__
+src/README.md
